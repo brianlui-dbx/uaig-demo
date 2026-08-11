@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MapleChain Supply-Chain Assistant</title>
+  <style>
+    :root {
+      --bg: #0f1115; --panel: #171a21; --panel-2: #1f232c; --border: #2a2f3a;
+      --text: #e7e9ee; --muted: #9aa3b2; --accent: #d4453b; --accent-2: #e2685f;
+      --user: #223049; --assistant: #1f232c;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      background: var(--bg); color: var(--text);
+      font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      display: flex; flex-direction: column; height: 100vh;
+    }
+    header {
+      padding: 14px 20px; border-bottom: 1px solid var(--border);
+      background: var(--panel); display: flex; align-items: center; gap: 10px; flex: 0 0 auto;
+    }
+    header .leaf { font-size: 20px; }
+    header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+    header .sub { color: var(--muted); font-size: 12px; margin-left: auto; }
+    #chat { flex: 1 1 auto; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 14px; }
+    .msg { max-width: 780px; width: fit-content; padding: 11px 14px; border-radius: 12px; white-space: pre-wrap; word-wrap: break-word; }
+    .msg.user { align-self: flex-end; background: var(--user); border: 1px solid #2c3d5c; }
+    .msg.assistant { align-self: flex-start; background: var(--assistant); border: 1px solid var(--border); }
+    .msg.assistant table { border-collapse: collapse; margin: 6px 0; }
+    .msg.assistant td, .msg.assistant th { border: 1px solid var(--border); padding: 4px 8px; }
+    .role { font-size: 11px; color: var(--muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: .04em; }
+    .msg.error { align-self: flex-start; background: #2a1416; border: 1px solid var(--accent); color: var(--accent-2); }
+    .typing { color: var(--muted); font-style: italic; }
+    footer { flex: 0 0 auto; border-top: 1px solid var(--border); background: var(--panel); padding: 14px 20px; }
+    form { display: flex; gap: 10px; max-width: 900px; margin: 0 auto; }
+    #q {
+      flex: 1; resize: none; background: var(--panel-2); color: var(--text);
+      border: 1px solid var(--border); border-radius: 10px; padding: 11px 12px; font: inherit; min-height: 46px; max-height: 160px;
+    }
+    #q:focus { outline: none; border-color: var(--accent); }
+    button {
+      background: var(--accent); color: #fff; border: 0; border-radius: 10px; padding: 0 18px;
+      font-weight: 600; cursor: pointer; font-size: 14px;
+    }
+    button:disabled { opacity: .5; cursor: default; }
+    .hint { max-width: 900px; margin: 8px auto 0; color: var(--muted); font-size: 12px; }
+    .hint b { color: var(--text); font-weight: 600; }
+    .examples { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+    .examples button {
+      background: var(--panel-2); color: var(--muted); border: 1px solid var(--border);
+      border-radius: 16px; padding: 5px 12px; font-size: 12px; font-weight: 500;
+    }
+    .examples button:hover { color: var(--text); border-color: var(--accent); }
+  </style>
+</head>
+<body>
+  <header>
+    <span class="leaf">🍁</span>
+    <h1>MapleChain Supply-Chain Assistant</h1>
+    <span class="sub">Unity AI Gateway demo · tools: UC functions · Genie · custom MCP</span>
+  </header>
+
+  <div id="chat">
+    <div class="msg assistant">
+      <div class="role">assistant</div>
+      Hi! I'm the MapleChain supply-chain assistant. Ask me about suppliers, inventory, orders,
+      shipments, delivery ETAs, carbon footprint, or query the data in natural language.
+      <div class="examples">
+        <button type="button" data-q="What is the supplier risk score for supplier SUP-003?">Supplier risk (SUP-003)</button>
+        <button type="button" data-q="Using the Genie space, how many suppliers are there and in which provinces?">Suppliers by province (Genie)</button>
+        <button type="button" data-q="Estimate the carbon footprint of shipping a 500 kg refrigerated order from Vancouver to Toronto.">Carbon footprint (custom MCP)</button>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    <form id="f">
+      <textarea id="q" placeholder="Ask about MapleChain suppliers, inventory, orders… (Enter to send, Shift+Enter for newline)" autofocus></textarea>
+      <button id="send" type="submit">Send</button>
+    </form>
+    <div class="hint">Runs through the <b>Model Service</b> (Unity AI Gateway) with <b>UC-function</b>, <b>Genie</b>, and <b>custom MCP</b> tools.</div>
+  </footer>
+
+  <script>
+    const chat = document.getElementById("chat");
+    const form = document.getElementById("f");
+    const q = document.getElementById("q");
+    const sendBtn = document.getElementById("send");
+    // Full conversation history sent each turn (the /invocations endpoint is stateless).
+    const history = [];
+
+    function addMsg(role, text, cls) {
+      const el = document.createElement("div");
+      el.className = "msg " + (cls || role);
+      const r = document.createElement("div");
+      r.className = "role";
+      r.textContent = role;
+      el.appendChild(r);
+      const body = document.createElement("div");
+      body.textContent = text;
+      el.appendChild(body);
+      chat.appendChild(el);
+      chat.scrollTop = chat.scrollHeight;
+      return body;
+    }
+
+    // Extract the assistant's text from the /invocations ResponsesAgent output.
+    // Handles both plain output_text and the nested reasoning+text list encoding.
+    function extractText(data) {
+      const parts = [];
+      for (const item of (data.output || [])) {
+        for (const c of (item.content || [])) {
+          let t = c.text;
+          if (typeof t === "string" && t.trimStart().startsWith("[")) {
+            try {
+              for (const p of JSON.parse(t)) {
+                if (p && p.type === "text" && p.text) parts.push(p.text);
+              }
+              continue;
+            } catch (e) { /* fall through, use raw */ }
+          }
+          if (typeof t === "string" && t) parts.push(t);
+        }
+      }
+      return parts.join("\n").trim() || "(no text in response)";
+    }
+
+    async function ask(text) {
+      addMsg("user", text);
+      history.push({ role: "user", content: text });
+      q.value = "";
+      sendBtn.disabled = true;
+      const thinking = addMsg("assistant", "thinking…", "assistant");
+      thinking.parentElement.querySelector(".role").textContent = "assistant";
+      thinking.className = "typing";
+      try {
+        const resp = await fetch("/invocations", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ input: history }),
+        });
+        if (!resp.ok) {
+          const body = await resp.text();
+          thinking.className = "";
+          thinking.parentElement.className = "msg error";
+          thinking.textContent = "Error " + resp.status + ": " + body.slice(0, 400);
+          return;
+        }
+        const data = await resp.json();
+        const answer = extractText(data);
+        thinking.className = "";
+        thinking.textContent = answer;
+        history.push({ role: "assistant", content: answer });
+      } catch (e) {
+        thinking.className = "";
+        thinking.parentElement.className = "msg error";
+        thinking.textContent = "Request failed: " + e.message;
+      } finally {
+        sendBtn.disabled = false;
+        q.focus();
+      }
+    }
+
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const text = q.value.trim();
+      if (text) ask(text);
+    });
+
+    q.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        form.requestSubmit();
+      }
+    });
+
+    chat.addEventListener("click", (e) => {
+      const b = e.target.closest("button[data-q]");
+      if (b && !sendBtn.disabled) ask(b.getAttribute("data-q"));
+    });
+  </script>
+</body>
+</html>

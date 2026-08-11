@@ -1,0 +1,57 @@
+# This is a Databricks asset bundle definition for uaig-demo.
+# The Databricks extension requires databricks.yml configuration file.
+# See https://docs.databricks.com/dev-tools/bundles/index.html for documentation.
+
+bundle:
+  name: uaig-demo
+
+resources:
+  apps:
+    maplechain_mcp:
+      name: "mcp-maplechain"
+      description: "MapleChain custom MCP server (supply-chain tools)"
+      source_code_path: ./mcp_app
+      config:
+        command: ["uv", "run", "maplechain-mcp"]
+
+    maplechain_agent:
+      name: "maplechain-agent"
+      description: "MapleChain supply-chain LangGraph agent"
+      source_code_path: ./agent_app
+      config:
+        command: ["uv", "run", "start-server"]
+        env:
+          - name: MLFLOW_TRACKING_URI
+            value: "databricks"
+          - name: MLFLOW_REGISTRY_URI
+            value: "databricks-uc"
+          - name: MODEL_SERVICE
+            value: "catalog_sandbox_y049iu.uaig_demo.maplechain_custom_ms"
+          - name: UC_CATALOG
+            value: "catalog_sandbox_y049iu"
+          - name: UC_SCHEMA
+            value: "uaig_demo"
+          - name: MCP_SERVICE
+            value: "catalog_sandbox_y049iu.uaig_demo.maplechain_mcp"
+          - name: GENIE_SPACE_ID
+            value: "01f195199b53146bafba80ed5f97bff5"
+          - name: CUSTOM_MCP_URL
+            value: ""
+          - name: MLFLOW_EXPERIMENT_ID
+            value: "1236839805230766"
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://adb-7405619474463800.0.azuredatabricks.net
+    # Keep explicit app names (no [dev ...] prefix) so setup.ipynb can look them up.
+    presets:
+      name_prefix: ""
+
+  ## Optionally, there could be 'staging' or 'prod' targets here.
+  #
+  # prod:
+  #   workspace:
+  #     host: https://adb-7405619474463800.0.azuredatabricks.net

@@ -1,0 +1,2 @@
+command: ["uv", "run", "maplechain-mcp"]
+# Databricks Apps listen on port 8000 by default; the MCP protocol is served at /mcp.

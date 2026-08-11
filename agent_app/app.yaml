@@ -1,0 +1,28 @@
+command: ["uv", "run", "start-server"]
+# Databricks Apps listen on port 8000; the MLflow AgentServer serves /invocations there.
+
+env:
+  - name: MLFLOW_TRACKING_URI
+    value: "databricks"
+  - name: MLFLOW_REGISTRY_URI
+    value: "databricks-uc"
+  # MapleChain wiring — the agent's LLM is the UC Model Service (routed via the AI Gateway),
+  # tools are the MCP servers.
+  - name: MODEL_SERVICE
+    value: "catalog_sandbox_y049iu.uaig_demo.maplechain_custom_ms"
+  - name: UC_CATALOG
+    value: "catalog_sandbox_y049iu"
+  - name: UC_SCHEMA
+    value: "uaig_demo"
+  # Custom MCP server via its UC MCP Service (gateway-governed). catalog.schema.<id>.
+  - name: MCP_SERVICE
+    value: "catalog_sandbox_y049iu.uaig_demo.maplechain_mcp"
+  # Genie space id → managed Genie MCP (natural-language data Q&A). Set to the id printed by
+  # setup.ipynb §2b; blank disables the Genie tool. The App SP needs CAN_RUN on the space.
+  - name: GENIE_SPACE_ID
+    value: "01f195199b53146bafba80ed5f97bff5"
+  # Legacy raw custom-MCP App URL. Prefer MCP_SERVICE above; leave blank.
+  - name: CUSTOM_MCP_URL
+    value: ""
+  - name: MLFLOW_EXPERIMENT_ID
+    value: "1236839805230766"

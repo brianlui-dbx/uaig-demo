@@ -1,0 +1,29 @@
+# Databricks bundle state (terraform state, deployment metadata, local env)
+.databricks/
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+
+# Node (mermaid-cli / any frontend tooling)
+node_modules/
+
+# Local secrets / env (never commit real values; .env.example is the template)
+.env
+*.env
+!.env.example
+
+# Editor / IDE
+.vscode/
+.idea/
+.DS_Store
+
+# Claude Code local settings
+.claude/
+
+# Stray Databricks Connect type stub
+__builtins__.pyi

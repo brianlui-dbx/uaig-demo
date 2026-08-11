@@ -1,0 +1,78 @@
+%%{init: {"theme":"base","flowchart":{"nodeSpacing":50,"rankSpacing":90,"curve":"basis"},"themeVariables":{
+  "fontFamily":"-apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif",
+  "fontSize":"13px",
+  "primaryColor":"#f6f8fa","primaryBorderColor":"#8892a0","primaryTextColor":"#1b1f24",
+  "lineColor":"#5b6470"
+}}}%%
+flowchart LR
+  user(["User browser"]):::ext
+
+  %% Databricks Apps
+  agent["<b>maplechain-agent</b> App<br/>LangGraph agent + chat UI"]:::app
+  mcpapp["<b>mcp-maplechain</b> App — MCP tools:<br/>carbon_footprint_estimate<br/>supplier_certifications<br/>seasonal_sourcing"]:::app
+
+  %% Gateway UC securables
+  ms["<b>Model Service</b><br/>maplechain_custom_ms<br/>routing 70/30 + fallback<br/>rate limits · inference table"]:::gw
+  mcpsvc["<b>MCP Service</b><br/>maplechain_mcp"]:::gw
+  agentsvc["<b>Agent Service</b> (Beta)<br/>maplechain_agent_svc<br/>registered in UC"]:::gw
+
+  %% Service policies (Beta guardrails) — declared next to the gateway securables so it lays
+  %% out beside the Model/MCP Services that attach it (keeps the guardrail edges short).
+  policies["<b>Service policies</b> (guardrails, Beta)<br/>deny_competitor_pricing<br/>ask_before_bulk_delete"]:::uc
+
+  %% Foundation models (keyless)
+  sonnet["primary 70%<br/>system.ai.databricks-claude-sonnet-5"]:::fm
+  oss["secondary 30%<br/>system.ai.gpt-oss-120b"]:::fm
+  haiku["fallback<br/>system.ai.databricks-claude-haiku-4-5"]:::fm
+
+  %% Unity Catalog objects
+  funcs["<b>UC functions</b> (managed MCP)<br/>get_supplier_risk → suppliers<br/>check_inventory → inventory<br/>estimate_delivery_eta → shipments<br/>lookup_restaurant_order_history → orders"]:::uc
+  genie["<b>Genie space</b> (managed MCP)<br/>MapleChain Supply Chain"]:::uc
+  conn["<b>HTTP connections</b> (OAuth M2M)<br/>maplechain_custom_mcp<br/>maplechain_agent_conn"]:::uc
+  tables["<b>Tables</b><br/>suppliers · products<br/>restaurant_customers · orders<br/>shipments · inventory"]:::uc
+
+  %% --- traffic ---
+  user -->|HTTPS| agent
+
+  %% agent LLM -> Model Service -> keyless routing + guardrails (all emanate from ms, kept adjacent)
+  agent -->|"LLM · use_ai_gateway=True<br/>/ai-gateway/mlflow/v1"| ms
+  ms -->|70%| sonnet
+  ms -->|30%| oss
+  ms -.->|on failure| haiku
+  ms -.->|"guardrails (UI, Beta)"| policies
+
+  %% agent's 3 tool sources, each to its specific target
+  agent -->|"tool 1: /api/2.0/mcp/functions/…/{fn}"| funcs
+  agent -->|"tool 2: /api/2.0/mcp/genie/{id}"| genie
+  agent -->|"tool 3: /ai-gateway/mcp-services/…"| mcpsvc
+  %% Service policies attach to Model/MCP Services — NOT to UC functions (those use UC grants +
+  %% row filters / column masks).
+  mcpsvc -.->|"guardrails (UI, Beta)"| policies
+
+  %% Services -> connections -> app HTTP endpoints (gateway proxies via OAuth M2M)
+  mcpsvc -->|source_connection| conn
+  agentsvc -->|source_connection| conn
+  conn -->|"proxies to /mcp"| mcpapp
+  conn -->|"proxies to /invocations"| agent
+
+  %% data access: which tables each source reads
+  funcs -->|reads| tables
+  genie -->|"queries (all 6)"| tables
+
+  %% registration
+  agent -.->|"registered in UC as"| agentsvc
+
+  %% legend (color = layer)
+  subgraph LEGEND["Layer"]
+    direction LR
+    l1[" Databricks App "]:::app
+    l2[" Gateway UC securable "]:::gw
+    l4[" system.ai.* model "]:::fm
+  end
+
+  classDef ext fill:#eef1f5,stroke:#8892a0,color:#1b1f24;
+  classDef app fill:#e6f0ff,stroke:#3b6fb0,color:#10243e;
+  classDef gw fill:#fdead0,stroke:#d08a2c,color:#3a2a10;
+  classDef uc fill:#e7f4ea,stroke:#3f9d5a,color:#123020;
+  classDef fm fill:#f3e9fb,stroke:#8a54c6,color:#2c1440;
+  style LEGEND fill:#ffffff,stroke:#c2c9d2,color:#5b6470
