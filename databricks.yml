@@ -1,9 +1,32 @@
-# This is a Databricks asset bundle definition for uaig-demo.
-# The Databricks extension requires databricks.yml configuration file.
-# See https://docs.databricks.com/dev-tools/bundles/index.html for documentation.
+# Databricks Asset Bundle for uaig-demo (MapleChain Unity AI Gateway demo).
+# See https://docs.databricks.com/dev-tools/bundles/index.html
+#
+# ─────────────────────────────────────────────────────────────────────────────
+#  SINGLE SOURCE OF TRUTH — change these two knobs to retarget the whole demo:
+#    • Workspace / URL : chosen by the CLI --profile flag (NOT stored here), so the
+#                        host lives only in ~/.databrickscfg. Switch workspace = --profile <name>.
+#    • Catalog / schema: the `variables` block below. Change `catalog` in ONE place and it
+#                        flows to both Apps (config.env) and the setup notebook (job params).
+#  After the first notebook run, drop in the printed genie_space_id / experiment_id below
+#  (or pass --var 'genie_space_id=...'), then redeploy.
+# ─────────────────────────────────────────────────────────────────────────────
 
 bundle:
   name: uaig-demo
+
+variables:
+  catalog:
+    description: UC catalog for all MapleChain demo assets. THE knob to change per workspace.
+    default: catalog_sandbox_gcgw55
+  schema:
+    description: UC schema for all MapleChain demo assets.
+    default: uaig_demo
+  genie_space_id:
+    description: Genie space id printed by setup.ipynb §2b (blank disables the agent's Genie tool).
+    default: "01f1aba72d1c11ab9ea14f121048741d"
+  experiment_id:
+    description: MLflow experiment id printed by setup.ipynb §4-grants (the agent logs to it).
+    default: "4050076709242200"
 
 resources:
   apps:
@@ -20,38 +43,45 @@ resources:
       source_code_path: ./agent_app
       config:
         command: ["uv", "run", "start-server"]
+        # Env is defined HERE (databricks.yml), so ${var.*} substitutes at deploy time. Deploy
+        # the app with `databricks bundle run maplechain_agent` (which applies this config.env) —
+        # NOT `apps deploy --source-code-path`, which would read the static agent_app/app.yaml.
+        # MODEL_SERVICE / MCP_SERVICE are DERIVED from UC_CATALOG+UC_SCHEMA in agent.py, so the
+        # catalog appears exactly once (var.catalog).
         env:
           - name: MLFLOW_TRACKING_URI
             value: "databricks"
           - name: MLFLOW_REGISTRY_URI
             value: "databricks-uc"
-          - name: MODEL_SERVICE
-            value: "catalog_sandbox_y049iu.uaig_demo.maplechain_custom_ms"
           - name: UC_CATALOG
-            value: "catalog_sandbox_y049iu"
+            value: ${var.catalog}
           - name: UC_SCHEMA
-            value: "uaig_demo"
-          - name: MCP_SERVICE
-            value: "catalog_sandbox_y049iu.uaig_demo.maplechain_mcp"
+            value: ${var.schema}
           - name: GENIE_SPACE_ID
-            value: "01f195199b53146bafba80ed5f97bff5"
-          - name: CUSTOM_MCP_URL
-            value: ""
+            value: ${var.genie_space_id}
           - name: MLFLOW_EXPERIMENT_ID
-            value: "1236839805230766"
+            value: ${var.experiment_id}
+
+  jobs:
+    setup:
+      name: maplechain-setup
+      # Serverless notebook job (no cluster block). Run with:
+      #   databricks bundle run setup -t dev --profile <profile>
+      # so the notebook's catalog/schema widgets come from the SAME variables as the Apps.
+      tasks:
+        - task_key: setup
+          notebook_task:
+            notebook_path: ./setup.ipynb
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
 
 targets:
   dev:
     mode: development
     default: true
-    workspace:
-      host: https://adb-7405619474463800.0.azuredatabricks.net
-    # Keep explicit app names (no [dev ...] prefix) so setup.ipynb can look them up.
+    # No workspace.host — the host comes from the CLI --profile, the single place a workspace
+    # URL is configured. This is why switching workspaces is just `--profile <name>`.
     presets:
+      # Keep explicit app names (no [dev ...] prefix) so setup.ipynb can look them up.
       name_prefix: ""
-
-  ## Optionally, there could be 'staging' or 'prod' targets here.
-  #
-  # prod:
-  #   workspace:
-  #     host: https://adb-7405619474463800.0.azuredatabricks.net

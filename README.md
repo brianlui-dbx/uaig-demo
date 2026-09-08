@@ -52,48 +52,78 @@ HTTP connection. Guardrail **service policies** attach to the Model/MCP Service 
 
 ## Prerequisites
 
-- Databricks workspace in a **Unity AI Gateway supported region** (not Azure Government). Built
-  and verified against the **`dbw-brlui-sandbox`** profile (Azure).
+- Databricks workspace in a **Unity AI Gateway supported region** (not Azure Government).
+  Verified end-to-end on the **`dbw-brlui-sandbox`** profile (Azure) — workspace `7405610844310054`,
+  catalog `catalog_sandbox_gcgw55`, schema `uaig_demo`.
+- The Databricks **CLI** (`databricks bundle` / `databricks apps`) and a `--profile` authenticated
+  to your target workspace.
 - Permission to create UC objects, gateway services (`CREATE SERVICE`), and apps.
-- `databricks-sdk >= 0.125` — that's where `w.ai_gateway` lands (the notebook pins it).
+- `databricks-sdk` is **pinned to `==0.125.0`** in the notebook (§0), and this must stay an
+  **exact** pin, not a floor. Newer SDKs (verified: 0.136.0) have **removed** the Beta
+  `AgentService` classes from `databricks.sdk.service.catalog`, so a bare `>=0.125` resolved with
+  `-U` breaks §4-agent-service with `ImportError: cannot import name 'AgentService'`. Bump the pin
+  only after re-verifying the target SDK still exports `AgentService`/`AgentServiceConfig` from
+  `catalog` (0.125.0 resolves cleanly alongside `databricks-agents>=1.9`).
 
-## Run order
+## Retargeting — the ONLY two knobs (change these, nothing else)
 
-1. Open `setup.ipynb`, set the `catalog` / `schema` widgets, run all cells.
-   - §3 creates the **Model Service** (`catalog.schema.maplechain_custom_ms`) — a UC object, no
-     serverless endpoint to wait on.
-   - §5 exercises it via `/ai-gateway/mlflow/v1`; a service-policy "block" only fires if you've
-     attached the policy in the UI (§2d), so it may simply answer.
-2. Deploy the two apps (needs the local CLI + this repo). Apps must be **started** before a
-   source deploy, and deploy needs an explicit `--source-code-path` (the bundle upload path):
-   ```bash
-   databricks bundle deploy -t dev --profile dbw-brlui-sandbox
-   databricks apps start  mcp-maplechain   --profile dbw-brlui-sandbox
-   databricks apps start  maplechain-agent --profile dbw-brlui-sandbox
-   BASE=/Workspace/Users/<you>/.bundle/uaig-demo/dev/files
-   databricks apps deploy mcp-maplechain   --source-code-path "$BASE/mcp_app"   --profile dbw-brlui-sandbox
-   databricks apps deploy maplechain-agent --source-code-path "$BASE/agent_app" --profile dbw-brlui-sandbox
-   ```
-   Opening **`maplechain-agent`**'s URL shows a built-in **chat UI** (served from the FastAPI app;
-   see `agent_app/README.md`). **`mcp-maplechain`** is an **MCP endpoint only** — like the upstream
-   hello-world template it has no web page, so `/` returns 404 by design; it's consumed by the
-   agent and the MCP Service, not opened in a browser. Its protocol lives at `/mcp`.
-3. Run the notebook's **§4-grants** cell — grants the agent's service principal UC schema access,
-   **`EXECUTE` on the Model Service**, **`CAN_RUN` on the Genie space** (so its Genie MCP tool
-   works), and CAN_MANAGE on its MLflow experiment (without these the agent App crashes on startup
-   or gets `INSUFFICIENT_PERMISSIONS`/`PERMISSION_DENIED` on tool calls). Wire the printed
-   experiment id into `MLFLOW_EXPERIMENT_ID` and the Genie space id (from §2b) into `GENIE_SPACE_ID`
-   (`agent_app/app.yaml` + bundle env). `MCP_SERVICE` defaults to the custom MCP Service; the agent
-   reaches it through the AI Gateway, so no extra grant is needed.
-4. Re-run **§2c-sp → §2c** (and **§4-agent-service**) so the Apps register as UC HTTP connections
-   (OAuth M2M) **and** first-class MCP / Agent Services. These no-op cleanly before the Apps exist,
-   so the first full pass creates them once the Apps are deployed.
+Everything location-specific is centralized so a new workspace/catalog is a one-line change:
+
+| To change… | Edit… | Notes |
+|---|---|---|
+| **Workspace / URL** | the CLI `--profile <name>` | The host lives only in `~/.databrickscfg`, never in the repo. Switching workspace = a different `--profile`. |
+| **Catalog / schema** | `variables.catalog` / `variables.schema` in `databricks.yml` | One value flows to **both** the Apps (`config.env`, via `${var.catalog}`) **and** the notebook (job `base_parameters`). Or override per-run: `--var 'catalog=<name>'`. |
+
+The genie/experiment ids the notebook prints go in the same `variables:` block
+(`genie_space_id`, `experiment_id`). The agent's `MODEL_SERVICE` / `MCP_SERVICE` are **derived**
+from `UC_CATALOG`+`UC_SCHEMA` in `agent_server/agent.py`, so the catalog is never repeated in a
+service name. App env is defined **only** in `databricks.yml` (`config.env`), not in the static
+`agent_app/app.yaml` — which is why the apps must be deployed with **`bundle run`** (it applies
+`config.env`), not `apps deploy --source-code-path` (which would read the env-less `app.yaml`).
+
+## Run order (bundle-native; `<p>` = your `--profile`)
+
+```bash
+# 1. Create the app shells (+ their service principals) + the `setup` job, and sync files.
+databricks bundle deploy -t dev --profile <p>
+
+# 2. Run the setup notebook as a serverless job. catalog/schema come from var.* automatically.
+#    Prints the Genie space id (§2b) and the MLflow experiment id (§4-grants).
+databricks bundle run setup -t dev --profile <p>
+
+# 3. Put those two ids into databricks.yml `variables` (genie_space_id, experiment_id) — or pass
+#    them as --var below — then redeploy so config.env picks them up.
+databricks bundle deploy -t dev --profile <p>
+
+# 4. Deploy the app source. `bundle run <app>` applies config.env AND starts the app.
+databricks bundle run maplechain_mcp   -t dev --profile <p>
+databricks bundle run maplechain_agent -t dev --profile <p>
+
+# 5. (Optional) re-run — idempotent — so the MCP/Agent Services bind to the now-live app backends.
+databricks bundle run setup -t dev --profile <p>
+```
+
+- §3 of the notebook creates the **Model Service** (`catalog.schema.maplechain_custom_ms`) — a UC
+  object, no serverless endpoint to wait on. §4-grants grants the agent's SP UC schema access,
+  **`EXECUTE` on the Model Service**, **`CAN_RUN` on the Genie space**, and `CAN_MANAGE` on its
+  MLflow experiment (without these the agent App crashes on startup or gets
+  `INSUFFICIENT_PERMISSIONS`/`PERMISSION_DENIED` on tool calls).
+- Opening **`maplechain-agent`**'s URL shows a built-in **chat UI** (served from the FastAPI app;
+  see `agent_app/README.md`). **`mcp-maplechain`** is an **MCP endpoint only** — like the upstream
+  hello-world template it has no web page, so `/` returns 404 by design; it's consumed by the agent
+  and the MCP Service, not opened in a browser. Its protocol lives at `/mcp`.
+- The apps are gated by workspace OAuth (SSO), so a browser is the normal client. To invoke
+  headlessly, mint an OAuth token for the gateway SP (its client id/secret are in the
+  `maplechain_demo` secret scope) via `POST /oidc/v1/token` (client_credentials, scope `all-apis`)
+  and call `<app-url>/invocations` with `{"input":[{"role":"user","content":"…"}]}`.
+
+> **Switching to a brand-new workspace on the same target?** DABs keeps Terraform state per
+> workspace; if a re-point trips a `workspace_id mismatch`, clear the local cache with
+> `rm -rf .databricks/bundle/dev` and redeploy.
 
 ## Manual / UI-based steps (to complete the end-to-end demo)
 
-The notebook automates everything the API allows, but a few things are either **UI-only** (Beta
-surfaces with no API) or **environment-specific values** you wire in by hand. Do these to get the
-full experience:
+The notebook + bundle automate everything the API allows. Two things remain:
 
 1. **Attach a service policy (guardrail) — UI-only, Beta.** §2d *creates* the policy UDFs
    (`deny_competitor_pricing`, `ask_before_bulk_delete`) and lists the built-ins
@@ -102,16 +132,7 @@ full experience:
    Policies → New policy →** pick a built-in or `catalog.schema.deny_competitor_pricing` → set the
    phase (request/response), rank, and principals → **Save**. Until you do this, §5's "guardrail"
    call just answers normally — nothing is blocked.
-2. **Set the environment-specific env vars, then redeploy the agent.** After the first notebook run
-   prints them, put these in `agent_app/app.yaml` **and** the `databricks.yml` agent env, then
-   `bundle deploy` + `apps deploy maplechain-agent`:
-   - `GENIE_SPACE_ID` — the id printed by **§2b** (workspace-specific; blank disables the Genie tool).
-   - `MLFLOW_EXPERIMENT_ID` — the id printed by **§4-grants**.
-   - `MCP_SERVICE` / `CUSTOM_MCP_URL` — `MCP_SERVICE` defaults to `catalog.schema.maplechain_mcp`; leave `CUSTOM_MCP_URL` blank (legacy path).
-3. **Deploy & (re)deploy the two Apps from the local CLI.** App create/start/deploy is not done by
-   the notebook — run the `bundle deploy` + `apps start` + `apps deploy --source-code-path` block in
-   **Run order §2** from this repo. (Apps must be **started** before a source deploy.)
-4. **Complete OAuth for a connection only if you change its auth type.** The demo uses **OAuth M2M**
+2. **Complete OAuth for a connection only if you change its auth type.** The demo uses **OAuth M2M**
    (fully scripted). If you instead switch a connection to **DCR** or **User-to-Machine** auth, that
    requires a one-time **Login** in Catalog Explorer → the connection → **Login**.
 
@@ -122,7 +143,7 @@ setup.ipynb        Idempotent orchestrator (§0–§6). Generated by build_noteb
 build_notebook.py  Source of truth for setup.ipynb — edit here, then regenerate.
 mcp_app/           Custom MCP server (FastMCP) → Databricks App → UC connection → MCP Service.
 agent_app/         LangGraph ResponsesAgent → Databricks App (built-in chat UI at /); LLM = Model Service.
-databricks.yml     Bundle defining both apps.
+databricks.yml     Bundle + SINGLE SOURCE OF TRUTH: variables (catalog/schema/ids), both apps, setup job.
 tasks/             Build notes + standalone verify scripts (verify_model_service.py, verify_uc.py, …).
 ```
 

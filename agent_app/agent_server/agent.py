@@ -47,16 +47,19 @@ mlflow.langchain.autolog()
 logging.getLogger("mlflow.utils.autologging_utils").setLevel(logging.ERROR)
 sp_workspace_client = WorkspaceClient()
 
-# Demo configuration (set in app.yaml). Defaults match setup.ipynb widgets.
-# MODEL_SERVICE is the new-gateway Model Service FQN (catalog.schema.name); ChatDatabricks
-# routes to it through the Unity AI Gateway via use_ai_gateway=True.
-MODEL_SERVICE = os.environ.get("MODEL_SERVICE", "catalog_sandbox_y049iu.uaig_demo.maplechain_custom_ms")
-UC_CATALOG = os.environ.get("UC_CATALOG", "catalog_sandbox_y049iu")
+# Demo configuration. The catalog/schema are the ONLY location-specific knobs — set them once
+# (bundle var.catalog/var.schema → databricks.yml config.env). Everything below is DERIVED from
+# them, so retargeting a workspace/catalog never means editing a service name in two places.
+UC_CATALOG = os.environ.get("UC_CATALOG", "main")
 UC_SCHEMA = os.environ.get("UC_SCHEMA", "uaig_demo")
+# MODEL_SERVICE is the new-gateway Model Service FQN (catalog.schema.name); ChatDatabricks routes
+# to it through the Unity AI Gateway via use_ai_gateway=True. Derived from catalog/schema + the
+# fixed asset name; override the env var only to point at a differently named service.
+MODEL_SERVICE = os.environ.get("MODEL_SERVICE") or f"{UC_CATALOG}.{UC_SCHEMA}.maplechain_custom_ms"
 # Custom MCP server, reached through its UC MCP Service (the AI Gateway proxies auth via the
 # service's connection). Prefer the gateway MCP-Service endpoint over the raw App URL so the
-# call is governed by the UC object. MCP_SERVICE = catalog.schema.<mcp service id>; blank = skip.
-MCP_SERVICE = os.environ.get("MCP_SERVICE", f"{UC_CATALOG}.{UC_SCHEMA}.maplechain_mcp")
+# call is governed by the UC object. Derived like MODEL_SERVICE; blank env value = skip.
+MCP_SERVICE = os.environ.get("MCP_SERVICE") if "MCP_SERVICE" in os.environ else f"{UC_CATALOG}.{UC_SCHEMA}.maplechain_mcp"
 # Genie space id → managed Genie MCP server (/api/2.0/mcp/genie/{id}). Blank = skip.
 GENIE_SPACE_ID = os.environ.get("GENIE_SPACE_ID", "")
 # Optional: raw custom-MCP App URL (legacy path). Prefer MCP_SERVICE above; kept for flexibility.

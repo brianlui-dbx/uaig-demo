@@ -13,8 +13,8 @@ same `/invocations` endpoint. One process, no Node, no clone.
 
 ## Demo wiring (two things worth noticing)
 
-- **LLM = the Model Service** (`MODEL_SERVICE`, a UC gateway object, default
-  `catalog_sandbox_y049iu.uaig_demo.maplechain_custom_ms`), reached with
+- **LLM = the Model Service** (`MODEL_SERVICE`, a UC gateway object; **derived** from
+  `UC_CATALOG`+`UC_SCHEMA` as `<catalog>.<schema>.maplechain_custom_ms`), reached with
   `ChatDatabricks(model=MODEL_SERVICE, use_ai_gateway=True)`. Every turn goes through the Unity
   AI Gateway, so routing, fallback, and rate limits apply automatically.
 - **Tools = three MCP sources**, each loaded independently so one failing endpoint can't drop the
@@ -25,8 +25,12 @@ same `/invocations` endpoint. One process, no Node, no clone.
   Service** (`/ai-gateway/mcp-services/{MCP_SERVICE}`) — the mcp_app/ tools governed through the UC
   MCP Service, with the AI Gateway injecting the connection's credentials.
 
-Configuration is via env vars in `app.yaml` (`MODEL_SERVICE`, `UC_CATALOG`, `UC_SCHEMA`,
-`GENIE_SPACE_ID`, `MCP_SERVICE`, `CUSTOM_MCP_URL`) so the same code runs against any catalog/schema.
+Configuration is via env vars, defined once in the bundle (`databricks.yml` → `variables` +
+`config.env`): `UC_CATALOG`, `UC_SCHEMA`, `GENIE_SPACE_ID`, `MLFLOW_EXPERIMENT_ID`. `MODEL_SERVICE`
+and `MCP_SERVICE` are derived from `UC_CATALOG`+`UC_SCHEMA` (override the env var only to point at a
+differently named service). The static `app.yaml` carries only the `command` + MLflow tracking
+vars; location config is applied at deploy time by `bundle run`. For local dev, set the vars in a
+`.env` (see `.env.example`).
 
 ## Run locally
 
@@ -40,6 +44,6 @@ uv run start-server     # serves /invocations on http://localhost:8000
 From the repo root:
 
 ```bash
-databricks bundle deploy -t dev --profile dbw-brlui-sandbox
-databricks apps deploy maplechain-agent --profile dbw-brlui-sandbox
+databricks bundle deploy -t dev --profile <your-profile>
+databricks bundle run    maplechain_agent -t dev --profile <your-profile>   # applies config.env + starts
 ```

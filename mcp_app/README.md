@@ -26,8 +26,8 @@ uv run maplechain-mcp            # serves on http://localhost:8000/mcp
 From the repo root (the bundle defines this app as `mcp-maplechain`):
 
 ```bash
-databricks bundle deploy -t dev --profile dbw-brlui-sandbox
-databricks apps deploy mcp-maplechain --profile dbw-brlui-sandbox
+databricks bundle deploy -t dev --profile <your-profile>
+databricks bundle run    maplechain_mcp -t dev --profile <your-profile>
 ```
 
 Then re-run **§2c** of `setup.ipynb` to register/refresh the UC HTTP connection now that the

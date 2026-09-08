@@ -81,7 +81,10 @@ demo assets so re-runs are stable. Missing libraries (`mlflow`, `databricks-agen
 """)
 
 code(r"""
-dbutils.widgets.text("catalog", "catalog_sandbox_y049iu", "Catalog")
+# `catalog`/`schema` are the only location-specific knobs. The canonical run is
+# `databricks bundle run setup` (see databricks.yml), which passes them as base_parameters from
+# the single bundle var.catalog/var.schema — so these defaults only apply to manual/interactive runs.
+dbutils.widgets.text("catalog", "catalog_sandbox_gcgw55", "Catalog")
 dbutils.widgets.text("schema", "uaig_demo", "Schema")
 dbutils.widgets.text("model_service", "maplechain_custom_ms", "Model Service name (in schema)")
 dbutils.widgets.text("agent_model", "supply_chain_agent", "Agent model name (in schema)")
@@ -93,10 +96,14 @@ dbutils.widgets.text("gateway_sp", "maplechain-gateway-sp", "Gateway service pri
 
 code(r"""
 # %pip install is a no-op on re-run if versions already satisfied.
-# databricks-sdk>=0.125 is REQUIRED — that's where w.ai_gateway (Model/MCP/Agent Services,
-# McpService, etc.) lands. A looser floor lets the cluster keep an older preinstalled SDK
-# without those classes.
-%pip install -qU "mlflow>=3.10" "databricks-agents>=1.9" "databricks-langchain>=0.17" "langgraph>=1.1" "databricks-sdk>=0.125" openai faker
+# databricks-sdk is PINNED to ==0.125.0 — that's where the w.ai_gateway UC objects
+# (Model/MCP/**Agent** Services) all live in databricks.sdk.service.catalog. This must be an
+# EXACT pin, not a floor: a bare ">=0.125" with -U resolves to the newest SDK, and newer
+# releases (verified: 0.136.0) have REMOVED the Beta AgentService classes from that module, so
+# §4-agent-service fails with `ImportError: cannot import name 'AgentService'`. 0.125.0 resolves
+# cleanly alongside databricks-agents>=1.9 (dry-run verified). Bump this pin only after
+# re-verifying that the target SDK still exports AgentService/AgentServiceConfig from catalog.
+%pip install -qU "mlflow>=3.10" "databricks-agents>=1.9" "databricks-langchain>=0.17" "langgraph>=1.1" "databricks-sdk==0.125.0" openai faker
 dbutils.library.restartPython()
 """)
 
