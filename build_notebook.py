@@ -1091,6 +1091,32 @@ except Exception as e:
 print("\nDone. Re-run any section safely — all steps are idempotent.")
 ''')
 
+# ---------------------------------------------------------------------------
+# §7 — Surface IDs for databricks.yml
+# ---------------------------------------------------------------------------
+md(r"""
+## §7 — Bundle variable output
+
+Prints the two workspace-specific IDs that must be passed back to `databricks bundle deploy`
+via `--var` flags (or stored as `databricks.yml` defaults for this workspace).
+""")
+
+code(r'''
+import json as _json
+# exp_id is set in §4-grants; genie_space_id in §2b. Both default to "" if those sections
+# were skipped, which is handled gracefully by the agent app.
+_out = {
+    "genie_space_id": genie_space_id or "",
+    "experiment_id":  exp_id if "exp_id" in dir() else "",
+}
+print("=" * 60)
+print("Bundle variable output — copy these into your next deploy:")
+print(f"  --var 'genie_space_id={_out['genie_space_id']}'")
+print(f"  --var 'experiment_id={_out['experiment_id']}'")
+print("=" * 60)
+dbutils.notebook.exit(_json.dumps(_out))
+''')
+
 with open("setup.ipynb", "w") as f:
     json.dump({
         "cells": CELLS,

@@ -23,10 +23,10 @@ variables:
     default: uaig_demo
   genie_space_id:
     description: Genie space id printed by setup.ipynb §2b (blank disables the agent's Genie tool).
-    default: "01f1aba72d1c11ab9ea14f121048741d"
+    default: ""
   experiment_id:
     description: MLflow experiment id printed by setup.ipynb §4-grants (the agent logs to it).
-    default: "4050076709242200"
+    default: ""
 
 resources:
   apps:

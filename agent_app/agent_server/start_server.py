@@ -18,6 +18,8 @@ from mlflow.genai.agent_server import AgentServer, setup_mlflow_git_based_versio
 # Load env vars from .env before importing the agent for proper auth.
 load_dotenv(dotenv_path=Path(__file__).parent.parent / ".env", override=True)
 
+import logging as _logging
+
 import agent_server.agent  # noqa: E402  (import registers the @invoke/@stream handlers)
 
 # chat_proxy OFF — we serve our own static UI below instead of proxying to a Node frontend.
@@ -25,7 +27,10 @@ agent_server = AgentServer("ResponsesAgent", enable_chat_proxy=False)
 
 # Module-level app enables multiple workers.
 app = agent_server.app
-setup_mlflow_git_based_version_tracking()
+try:
+    setup_mlflow_git_based_version_tracking()
+except Exception as _e:
+    _logging.getLogger(__name__).warning("MLflow version tracking skipped: %s", _e)
 
 # Serve the built-in chat UI at / (mounted last so the AgentServer's API routes —
 # /invocations, /responses, /agent/info, /health — keep priority). html=True makes "/" return
