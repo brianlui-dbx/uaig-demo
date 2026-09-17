@@ -1,15 +1,1 @@
-command: ["uv", "run", "start-server"]
-# Databricks Apps listen on port 8000; the MLflow AgentServer serves /invocations there.
-#
-# Location-specific env (UC_CATALOG, UC_SCHEMA, GENIE_SPACE_ID, MLFLOW_EXPERIMENT_ID) is NOT set
-# here. It's defined once in the bundle (databricks.yml → variables + config.env) and applied at
-# deploy time by `databricks bundle run maplechain_agent`. Keeping it out of this static file is
-# what makes the catalog live in a single place. MODEL_SERVICE / MCP_SERVICE are derived from
-# UC_CATALOG + UC_SCHEMA in agent_server/agent.py.
-#
-# For LOCAL dev (`uv run start-server`), set those vars in a .env file (see .env.example).
-env:
-  - name: MLFLOW_TRACKING_URI
-    value: "databricks"
-  - name: MLFLOW_REGISTRY_URI
-    value: "databricks-uc"
+command: ['npm', 'run', 'start']

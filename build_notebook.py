@@ -46,9 +46,9 @@ md(r"""
 retailer *or* a CPG company) whose customers are Canadian restaurants. This single
 notebook stands up an **idempotent** demo of the **new Unity AI Gateway** — where the
 gateway is a set of **first-class Unity Catalog securables** governed alongside your data. It
-creates three of the four object types — **Model Service, MCP Service, Agent Service**; the
-fourth, **Model Provider Service** (bring-your-own-key external providers), is out of scope
-because routing here is **keyless**. Re-run any cell — or the whole notebook — safely.
+creates all four object types — **Model Service, Model Provider Service, MCP Service, and Agent
+Service**. The Microsoft Foundry provider example is optional and parameter-driven. Re-run any
+cell — or the whole notebook — safely.
 
 > This is the **new** gateway (`w.ai_gateway.*` → UC objects), **not** the legacy
 > per-endpoint `serving-endpoints put-ai-gateway` config. Routing is **keyless** (across the
@@ -59,12 +59,13 @@ because routing here is **keyless**. Re-run any cell — or the whole notebook �
 | §1 | UC foundation + mock supply-chain data |
 | §2 | **MCP Services in UC** (managed: UC functions + Genie; custom: an App-hosted MCP server → UC HTTP connection → **MCP Service**) + **service policies** (guardrail UDFs + grants) |
 | §3 | **Model Service** (UC object): routing / A-B split, fallback, rate limits, usage tracking, inference table |
-| §4 | **Register an agent in UC** + deploy as a Databricks App + wrap as a gateway **Agent Service** |
+| §3b | Optional Microsoft Foundry **Model Provider Service** |
+| §4 | Register a supplier-risk **ML model** + deploy the agent App + wrap it as an **Agent Service** |
 | §5 | Exercise the Model Service (`/ai-gateway/mlflow/v1`, request tags, rate limit) + query the agent |
 | §6 | Observability (`system.ai_gateway.usage` + inference table) + governance recap |
 
 **Maturity** — GA: Model / Model Provider / MCP Services, rate limits, usage tracking,
-inference tables, traffic split / fallback, UC model (agent) registration. *Beta*: Service
+inference tables, traffic split / fallback, UC classical-model registration. *Beta*: Service
 Policies (attachment is UI-only), Agent Service, `external_model_spend`. *Public Preview*:
 Genie programmatic create. Beta/Preview steps degrade gracefully so the notebook always completes.
 """)
@@ -84,14 +85,22 @@ code(r"""
 # `catalog`/`schema` are the only location-specific knobs. The canonical run is
 # `databricks bundle run setup` (see databricks.yml), which passes them as base_parameters from
 # the single bundle var.catalog/var.schema — so these defaults only apply to manual/interactive runs.
-dbutils.widgets.text("catalog", "catalog_sandbox_gcgw55", "Catalog")
+dbutils.widgets.text("catalog", "brlui", "Catalog")
 dbutils.widgets.text("schema", "uaig_demo", "Schema")
 dbutils.widgets.text("model_service", "maplechain_custom_ms", "Model Service name (in schema)")
-dbutils.widgets.text("agent_model", "supply_chain_agent", "Agent model name (in schema)")
+dbutils.widgets.text("ml_model", "supplier_risk_model", "Classical ML model name (in schema)")
 dbutils.widgets.text("genie_space_title", "MapleChain Supply Chain", "Genie space title")
 dbutils.widgets.text("warehouse_id", "", "SQL warehouse id (blank = auto-pick)")
 dbutils.widgets.text("secret_scope", "maplechain_demo", "Secret scope (SP OAuth client secret)")
 dbutils.widgets.text("gateway_sp", "maplechain-gateway-sp", "Gateway service principal name")
+dbutils.widgets.text("foundry_base_url", "", "Microsoft Foundry inference/project base URL")
+dbutils.widgets.text("foundry_model", "", "Microsoft Foundry model/deployment target")
+dbutils.widgets.text("foundry_secret_scope", "", "Secret scope containing the Foundry API key")
+dbutils.widgets.text("foundry_secret_key", "", "Secret key containing the Foundry API key")
+dbutils.widgets.text("azure_openai_base_url", "", "Azure OpenAI resource base URL")
+dbutils.widgets.text("azure_openai_model", "", "Azure OpenAI deployment/model target")
+dbutils.widgets.text("azure_openai_secret_scope", "", "Secret scope containing the Azure OpenAI API key")
+dbutils.widgets.text("azure_openai_secret_key", "", "Secret key containing the Azure OpenAI API key")
 """)
 
 code(r"""
@@ -114,10 +123,18 @@ from databricks.sdk import WorkspaceClient
 catalog        = dbutils.widgets.get("catalog")
 schema         = dbutils.widgets.get("schema")
 ms_name        = dbutils.widgets.get("model_service")          # Model Service id (in schema)
-agent_model    = dbutils.widgets.get("agent_model")
+ml_model       = dbutils.widgets.get("ml_model")
 genie_title    = dbutils.widgets.get("genie_space_title")
 secret_scope   = dbutils.widgets.get("secret_scope")           # holds the SP OAuth client secret
 gateway_sp     = dbutils.widgets.get("gateway_sp")             # SP that the HTTP connections authenticate as
+foundry_base_url = dbutils.widgets.get("foundry_base_url").strip()
+foundry_model = dbutils.widgets.get("foundry_model").strip()
+foundry_secret_scope = dbutils.widgets.get("foundry_secret_scope").strip()
+foundry_secret_key = dbutils.widgets.get("foundry_secret_key").strip()
+azure_openai_base_url = dbutils.widgets.get("azure_openai_base_url").strip()
+azure_openai_model = dbutils.widgets.get("azure_openai_model").strip()
+azure_openai_secret_scope = dbutils.widgets.get("azure_openai_secret_scope").strip()
+azure_openai_secret_key = dbutils.widgets.get("azure_openai_secret_key").strip()
 FQ             = f"`{catalog}`.`{schema}`"                      # backtick-quoted for SQL
 FQN            = f"{catalog}.{schema}"                          # plain, for names/URLs
 MS_FQN         = f"{FQN}.{ms_name}"                             # Model Service fully-qualified name
@@ -139,7 +156,10 @@ print(f"Gateway base : {GW_BASE}")
 warehouse_id = dbutils.widgets.get("warehouse_id").strip()
 if not warehouse_id:
     whs = list(w.warehouses.list())
-    warehouse_id = whs[0].id if whs else None
+    # Genie supports PRO / serverless SQL warehouses, but not the serverless RT
+    # (REYDEN) warehouse that can appear first in list results.
+    supported = [wh for wh in whs if str(getattr(wh, "warehouse_type", "")).upper().endswith("PRO")]
+    warehouse_id = (supported[0].id if supported else (whs[0].id if whs else None))
 print(f"Warehouse    : {warehouse_id}")
 """)
 
@@ -402,29 +422,25 @@ from databricks.sdk.service import apps as _apps
 APP_MCP   = "mcp-maplechain"      # Databricks App names (databricks.yml, name_prefix="")
 APP_AGENT = "maplechain-agent"
 
-# 1) Ensure the gateway service principal exists.
+# 1) Resolve the gateway service principal created by tasks/bootstrap_gateway_auth.py.
 gw_sp = next((s for s in w.service_principals.list() if s.display_name == gateway_sp), None)
 if gw_sp is None:
-    gw_sp = w.service_principals.create(display_name=gateway_sp)
-    print(f"Created service principal: {gateway_sp} (app_id={gw_sp.application_id})")
-else:
-    print(f"Service principal exists: {gateway_sp} (app_id={gw_sp.application_id})")
+    raise RuntimeError(
+        f"Missing {gateway_sp}. Run tasks/bootstrap_gateway_auth.py locally before setup."
+    )
+print(f"Service principal exists: {gateway_sp} (app_id={gw_sp.application_id})")
 gw_sp_app_id = gw_sp.application_id
 
-# 2) Ensure the secret scope + client_id/secret keys. Mint an OAuth secret only if absent.
-try:
-    w.secrets.create_scope(scope=secret_scope)
-    print(f"Created secret scope: {secret_scope}")
-except Exception:
-    pass  # already exists
+# 2) Verify the locally bootstrapped secret scope and keys. A serverless notebook runtime is not
+# authorized to mint account-level service-principal credentials.
 existing_keys = {s.key for s in (w.secrets.list_secrets(scope=secret_scope) or [])}
-if "sp_secret" not in existing_keys:
-    _sec = w.service_principal_secrets_proxy.create(service_principal_id=str(gw_sp.id))
-    w.secrets.put_secret(scope=secret_scope, key="sp_secret", string_value=_sec.secret)
-    print(f"Minted OAuth secret -> {secret_scope}/sp_secret")
-else:
-    print(f"OAuth secret already present at {secret_scope}/sp_secret (reusing)")
-w.secrets.put_secret(scope=secret_scope, key="sp_client_id", string_value=gw_sp_app_id)
+missing_keys = {"sp_client_id", "sp_secret"} - existing_keys
+if missing_keys:
+    raise RuntimeError(
+        f"Missing {secret_scope} keys {sorted(missing_keys)}. "
+        "Run tasks/bootstrap_gateway_auth.py locally before setup."
+    )
+print(f"OAuth credentials present in secret scope {secret_scope} (reusing)")
 
 # 3) Grant the SP CAN_USE on both Apps so its token is accepted by the App backends.
 for app_name in (APP_MCP, APP_AGENT):
@@ -592,7 +608,7 @@ A **Model Service** is a first-class UC securable (`catalog.schema.name`) create
 `w.ai_gateway.create_model_service(...)`. Ours, `maplechain_custom_ms`, routes **keyless**
 across the workspace's `system.ai.*` pay-per-token models — no serving endpoint, no secrets:
 
-- **Routing / A-B split** — `routing.destinations` 70/30 across two models.
+- **Deterministic routing** — one tool-capable primary model for reliable agent turns.
 - **Fallback** — `routing.fallback.destinations` (ordered) if the primary path fails.
 - **Rate limits** — `USER_DEFAULT` 60/min + `SERVICE` 1000/min.
 - **Usage tracking + inference table** — payload logging to `<prefix>_payload`.
@@ -636,11 +652,9 @@ def _pick(refs, *keywords):
 
 refs = _system_model_refs()
 primary   = _pick(refs, "databricks-claude-sonnet-5", "databricks-claude-sonnet-4-5", "sonnet")
-secondary = _pick(refs, "gpt-oss-120b", "llama-4-maverick", "gpt-oss")
 fallback  = _pick(refs, "databricks-claude-haiku", "haiku")
-assert primary and secondary and fallback, f"could not resolve model refs: {primary},{secondary},{fallback}"
-print(f"primary  (70%): {primary}")
-print(f"secondary(30%): {secondary}")
+assert primary and fallback, f"could not resolve model refs: {primary},{fallback}"
+print(f"primary (100%): {primary}")
 print(f"fallback      : {fallback}")
 
 def _dest(name, model_ref, pct):
@@ -651,7 +665,7 @@ def _dest(name, model_ref, pct):
 
 svc = ModelService(comment="MapleChain gateway model service (demo)", config=ModelServiceConfig(
     routing=ModelServiceConfigRoutingConfig(
-        destinations=[_dest("primary", primary, 70), _dest("secondary", secondary, 30)],
+        destinations=[_dest("primary", primary, 100)],
         fallback=ModelServiceConfigFallbackConfig(destinations=[_dest("fallback", fallback, 100)])),
     rate_limits=[
         RateLimit(key=RLK.RATE_LIMIT_KEY_USER_DEFAULT,
@@ -699,6 +713,17 @@ print("  fallback  :", [d.name for d in (r.fallback.destinations if r.fallback e
 print("  rate_limit:", [(rl.key.value, rl.requests) for rl in (got.config.rate_limits or [])])
 print("  api_types :", got.supported_api_types)
 
+# Consolidation migration: remove the former agent-only duplicate if an earlier version created it.
+AGENT_MS_NAME = "maplechain_agent_ms"
+AGENT_MS_FQN = f"{FQN}.{AGENT_MS_NAME}"
+AGENT_MS_RES = f"model-services/{AGENT_MS_FQN}"
+try:
+    w.ai_gateway.get_model_service(name=AGENT_MS_RES)
+    w.ai_gateway.delete_model_service(name=AGENT_MS_RES)
+    print(f"Removed superseded Model Service: {AGENT_MS_FQN}")
+except NotFound:
+    pass
+
 # Grant EXECUTE on the Model Service to a demo principal (UC governance). Model services are
 # not yet SQL-grantable (no `GRANT ... ON MODEL SERVICE`), so use the grants API with
 # securable_type="model_service".
@@ -712,101 +737,227 @@ except Exception as e:
 ''')
 
 # ---------------------------------------------------------------------------
-# §4 register agent in UC + deploy app
+# §3b Microsoft Foundry Model Provider Service
 # ---------------------------------------------------------------------------
 md(r"""
-## §4 — Register an agent in Unity Catalog + deploy it as a Databricks App
+### §3b — Microsoft Foundry Model Provider Service *(optional)*
+
+This example is created when all four deployment inputs are supplied: Foundry base URL, model
+target, and the Databricks secret scope/key holding the Foundry API key. The credential is read
+at runtime and sent over the authenticated Databricks API; it is never written into this notebook
+or bundle state. Leaving the inputs blank safely skips this optional resource.
+""")
+
+code(r'''
+foundry_inputs = {
+    "foundry_base_url": foundry_base_url,
+    "foundry_model": foundry_model,
+    "foundry_secret_scope": foundry_secret_scope,
+    "foundry_secret_key": foundry_secret_key,
+}
+provided = [k for k, v in foundry_inputs.items() if v]
+if provided and len(provided) != len(foundry_inputs):
+    missing = [k for k, v in foundry_inputs.items() if not v]
+    raise ValueError(f"Microsoft Foundry configuration is partial; missing: {', '.join(missing)}")
+
+if not provided:
+    print("Microsoft Foundry provider service skipped (pass all foundry_* bundle variables to enable it).")
+else:
+    from databricks.sdk.errors import NotFound
+    from databricks.sdk.service.catalog import (
+        FieldMask, ModelProviderService, ModelProviderServiceConfig,
+        ModelProviderServiceConfigExternalModelProviderType as ProviderType,
+        ModelProviderServiceConfigMicrosoftFoundryProviderConfig,
+        ModelProviderServiceConfigMicrosoftFoundryProviderDirectConfig,
+        ModelProviderServiceConfigModelTargetConfig,
+        ModelProviderServiceConfigProviderSecret,
+    )
+    provider_id = "maplechain_foundry"
+    provider_fqn = f"{FQN}.{provider_id}"
+    provider_res = f"model-provider-services/{provider_fqn}"
+    api_key = dbutils.secrets.get(scope=foundry_secret_scope, key=foundry_secret_key)
+    provider = ModelProviderService(
+        comment="MapleChain Microsoft Foundry model provider (bundle-managed example)",
+        config=ModelProviderServiceConfig(
+            provider_type=ProviderType.EXTERNAL_MODEL_PROVIDER_TYPE_MICROSOFT_FOUNDRY,
+            microsoft_foundry=ModelProviderServiceConfigMicrosoftFoundryProviderConfig(
+                direct=ModelProviderServiceConfigMicrosoftFoundryProviderDirectConfig(
+                    base_url=foundry_base_url,
+                    api_key=ModelProviderServiceConfigProviderSecret(plaintext=api_key),
+                )
+            ),
+            targets=[ModelProviderServiceConfigModelTargetConfig(model=foundry_model)],
+        ),
+    )
+    try:
+        w.ai_gateway.get_model_provider_service(name=provider_res)
+        w.ai_gateway.update_model_provider_service(
+            name=provider_res, model_provider_service=provider,
+            update_mask=FieldMask(field_mask=["comment", "config"]),
+        )
+        action = "Updated"
+    except NotFound:
+        w.ai_gateway.create_model_provider_service(
+            model_provider_service=provider, parent=f"schemas/{FQN}",
+            model_provider_service_id=provider_id,
+        )
+        action = "Created"
+    print(f"{action} Microsoft Foundry Model Provider Service: {provider_fqn}")
+''')
+
+# ---------------------------------------------------------------------------
+# §3c Azure OpenAI Model Provider Service
+# ---------------------------------------------------------------------------
+md(r"""
+### §3c — Azure OpenAI Model Provider Service *(optional)*
+
+This reproduces `maplechain_azure_mps` when all four `azure_openai_*` deployment inputs are
+provided. The API key is read from a Databricks secret at runtime and is never stored in source
+or bundle state. The service forwards headers, query parameters, and unmanaged paths; restrict
+the configured target explicitly; records an inference table; and applies the same service/user
+token limits as the reference deployment.
+""")
+
+code(r'''
+azure_inputs = {
+    "azure_openai_base_url": azure_openai_base_url,
+    "azure_openai_model": azure_openai_model,
+    "azure_openai_secret_scope": azure_openai_secret_scope,
+    "azure_openai_secret_key": azure_openai_secret_key,
+}
+azure_provided = [k for k, v in azure_inputs.items() if v]
+if azure_provided and len(azure_provided) != len(azure_inputs):
+    missing = [k for k, v in azure_inputs.items() if not v]
+    raise ValueError(f"Azure OpenAI configuration is partial; missing: {', '.join(missing)}")
+
+if not azure_provided:
+    print("Azure OpenAI provider service skipped (pass all azure_openai_* bundle variables to enable it).")
+else:
+    from databricks.sdk.errors import NotFound
+    from databricks.sdk.service.catalog import (
+        FieldMask, InferenceTableConfig, ModelProviderService, ModelProviderServiceConfig,
+        ModelProviderServiceConfigAzureOpenAiProviderConfig,
+        ModelProviderServiceConfigAzureOpenAiProviderDirectConfig,
+        ModelProviderServiceConfigExternalModelProviderType as ProviderType,
+        ModelProviderServiceConfigModelTargetConfig,
+        ModelProviderServiceConfigProviderSecret, RateLimit,
+        RateLimitRateLimitKey as RLK, RateLimitRateLimitRenewalPeriod as RLP,
+    )
+    azure_provider_id = "maplechain_azure_mps"
+    azure_provider_fqn = f"{FQN}.{azure_provider_id}"
+    azure_provider_res = f"model-provider-services/{azure_provider_fqn}"
+    azure_api_key = dbutils.secrets.get(
+        scope=azure_openai_secret_scope, key=azure_openai_secret_key)
+    azure_provider = ModelProviderService(
+        comment="MapleChain Azure OpenAI model provider (bundle-managed example)",
+        config=ModelProviderServiceConfig(
+            provider_type=ProviderType.EXTERNAL_MODEL_PROVIDER_TYPE_AZURE_OPENAI,
+            azure_openai=ModelProviderServiceConfigAzureOpenAiProviderConfig(
+                direct=ModelProviderServiceConfigAzureOpenAiProviderDirectConfig(
+                    base_url=azure_openai_base_url,
+                    api_key=ModelProviderServiceConfigProviderSecret(plaintext=azure_api_key),
+                )),
+            allow_all_targets=False,
+            forward_headers=True,
+            forward_query_parameters=True,
+            forward_unmanaged_paths=True,
+            targets=[ModelProviderServiceConfigModelTargetConfig(
+                model=azure_openai_model,
+                native_api_types=["openai/v1/chat/completions", "openai/v1/responses"],
+            )],
+            inference_table=InferenceTableConfig(
+                parent=f"schemas/{FQN}", table_name_prefix=azure_provider_id, disabled=False),
+            rate_limits=[
+                RateLimit(key=RLK.RATE_LIMIT_KEY_SERVICE,
+                          renewal_period=RLP.RATE_LIMIT_RENEWAL_PERIOD_HOUR,
+                          tokens=1_000_000),
+                RateLimit(key=RLK.RATE_LIMIT_KEY_USER_DEFAULT,
+                          renewal_period=RLP.RATE_LIMIT_RENEWAL_PERIOD_MINUTE,
+                          tokens=1_000),
+            ],
+        ),
+    )
+    try:
+        w.ai_gateway.get_model_provider_service(name=azure_provider_res)
+        w.ai_gateway.update_model_provider_service(
+            name=azure_provider_res, model_provider_service=azure_provider,
+            update_mask=FieldMask(field_mask=["comment", "config"]),
+        )
+        azure_action = "Updated"
+    except NotFound:
+        w.ai_gateway.create_model_provider_service(
+            model_provider_service=azure_provider, parent=f"schemas/{FQN}",
+            model_provider_service_id=azure_provider_id,
+        )
+        azure_action = "Created"
+    print(f"{azure_action} Azure OpenAI Model Provider Service: {azure_provider_fqn}")
+''')
+
+# ---------------------------------------------------------------------------
+# §4 register classical ML model + deploy agent app
+# ---------------------------------------------------------------------------
+md(r"""
+## §4 — Register a classical ML model + deploy the agent as a Databricks App
 
 Two complementary artifacts:
 
-1. **UC-registered agent** *(GA)* — a `ResponsesAgent` logged with MLflow and registered as
-   a **Unity Catalog model** `catalog.schema.<agent_model>`, with alias `@prod`. This is the
-   governed, versioned home for the agent in UC.
+1. **UC-registered ML model** — a scikit-learn regression pipeline registered as
+   `catalog.schema.<ml_model>`, with alias `@prod`. It predicts supplier risk from MapleChain's
+   supplier attributes and demonstrates conventional governed ML without representing the agent
+   as a model.
 2. **Deployed App** — the `agent_app/` LangGraph agent, deployed as a Databricks App. Its LLM is
    the **Model Service** (via `/ai-gateway/mlflow/v1`), and its tools are **all three** MCP
    sources from §2: the managed **UC functions** (per-function), the managed **Genie** MCP
    (`GENIE_SPACE_ID`), and the custom **MCP Service** (`MCP_SERVICE`, gateway-governed).
 3. **Gateway Agent Service** — the deployed App is also wrapped as a UC **Agent Service**.
 
-The registration below logs a compact `ResponsesAgent` inline so the notebook is
-self-contained; the full LangGraph implementation lives in `agent_app/`.
-""")
-
-code("""
-import mlflow
-mlflow.set_registry_uri("databricks-uc")
-
-# Inline ResponsesAgent entry (the full LangGraph version lives in agent_app/).
-# Built via string .replace() to keep it free of f-string brace escaping. The agent calls the
-# Model Service through the new gateway's OpenAI-compatible base (/ai-gateway/mlflow/v1), model
-# = the Model Service FQN.
-_agent_template = '''
-import os, uuid
-from mlflow.pyfunc import ResponsesAgent
-from mlflow.types.responses import ResponsesAgentRequest, ResponsesAgentResponse
-from mlflow.models import set_model
-
-MODEL_SERVICE = "__MODEL_SERVICE__"
-GW_BASE = "__GW_BASE__"
-
-class MapleChainAgent(ResponsesAgent):
-    "Supply-chain assistant routed through the MapleChain Model Service."
-    def predict(self, request: ResponsesAgentRequest) -> ResponsesAgentResponse:
-        from databricks.sdk import WorkspaceClient
-        from openai import OpenAI
-        w = WorkspaceClient()
-        token = w.config.authenticate().get("Authorization", "").replace("Bearer ", "")
-        client = OpenAI(base_url=GW_BASE, api_key=token)
-        msgs = [{"role": i.role, "content": i.content} for i in request.input]
-        completion = client.chat.completions.create(model=MODEL_SERVICE, messages=msgs)
-        raw = completion.choices[0].message.content
-        # Some models (e.g. Claude via the gateway) return structured content: a list of
-        # parts that may include reasoning blocks. Flatten to the plain output text.
-        if isinstance(raw, list):
-            parts = []
-            for p in raw:
-                if isinstance(p, dict):
-                    if p.get("type") in ("reasoning", "thinking"):
-                        continue
-                    parts.append(p.get("text") or p.get("content") or "")
-                else:
-                    parts.append(str(p))
-            text = "".join(parts).strip()
-        else:
-            text = raw or ""
-        # Helper stamps the required item `id`; hand-built dicts miss it and fail validation.
-        item = self.create_text_output_item(text=text, id=str(uuid.uuid4()))
-        return ResponsesAgentResponse(output=[item])
-
-set_model(MapleChainAgent())
-'''
-with open("_agent_entry.py", "w") as fh:
-    fh.write(_agent_template.replace("__MODEL_SERVICE__", MS_FQN).replace("__GW_BASE__", GW_BASE))
-print("Wrote _agent_entry.py (inline ResponsesAgent for UC registration).")
+The conversational agent remains application code in `agent_app/` and is exposed through the
+gateway Agent Service; it is intentionally not registered as a UC model.
 """)
 
 code(r'''
-import mlflow
+import mlflow, mlflow.sklearn
+import pandas as pd
 from mlflow.tracking import MlflowClient
+from sklearn.compose import ColumnTransformer
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder
 
 mlflow.set_registry_uri("databricks-uc")
-model_fqn = f"{FQN}.{agent_model}"
-example = {"input": [{"role": "user", "content": "What is the delivery ETA for ORD-9004?"}]}
+model_fqn = f"{FQN}.{ml_model}"
+training = spark.table(f"{FQN}.suppliers").select(
+    "category", "location", "certification", "quality_rating", "risk_score"
+).toPandas()
+X = training.drop(columns=["risk_score"])
+X["quality_rating"] = X["quality_rating"].astype(float)
+y = training["risk_score"].astype(float)
+categorical = ["category", "location", "certification"]
+pipeline = Pipeline([
+    ("features", ColumnTransformer([
+        ("categorical", OneHotEncoder(handle_unknown="ignore"), categorical),
+    ], remainder="passthrough")),
+    ("regressor", RandomForestRegressor(n_estimators=80, max_depth=4, random_state=42)),
+])
+pipeline.fit(X, y)
 
-# No serving-endpoint resource in the new gateway: the deployed App calls the Model Service
-# with its own service-principal creds (granted EXECUTE in §4-grants), so signature inference
-# at log time runs the input_example through the Model Service via /ai-gateway/mlflow/v1.
-with mlflow.start_run(run_name="maplechain-agent"):
-    info = mlflow.pyfunc.log_model(
-        name="agent",
-        python_model="_agent_entry.py",
-        input_example=example,
-        pip_requirements=["mlflow", "openai", "databricks-sdk"],
+with mlflow.start_run(run_name="maplechain-supplier-risk"):
+    predictions = pipeline.predict(X)
+    mlflow.log_metric("training_mae", float(abs(predictions - y).mean()))
+    info = mlflow.sklearn.log_model(
+        sk_model=pipeline, name="supplier_risk_model", input_example=X.head(3),
+        registered_model_name=model_fqn,
+        # This model is trained in this cell from repo-owned deterministic data. MLflow 3.10's
+        # skops serializer requires these two reviewed sklearn implementation types explicitly.
+        skops_trusted_types=[
+            "sklearn.compose._column_transformer._RemainderColsList",
+            "sklearn.tree._tree.Tree",
+        ],
     )
 
-uc = mlflow.register_model(model_uri=info.model_uri, name=model_fqn)
-MlflowClient().set_registered_model_alias(model_fqn, "prod", uc.version)
-print(f"Registered agent in UC: {model_fqn} v{uc.version} (alias @prod)")
+version = info.registered_model_version
+MlflowClient(registry_uri="databricks-uc").set_registered_model_alias(model_fqn, "prod", version)
+print(f"Registered classical ML model: {model_fqn} v{version} (alias @prod)")
 ''')
 
 md(r"""
@@ -847,6 +998,16 @@ its MLflow experiment. Idempotent; safe to re-run. No-ops if the agent App isn't
 """)
 
 code(r'''
+# Create the experiment independently of App availability so first-time bundle setup always
+# returns a usable experiment id and can seed traces before the App shell exists.
+from databricks.sdk.service.iam import AccessControlRequest, PermissionLevel
+exp_path = f"/Users/{me}/maplechain-agent-exp"
+try:
+    exp_id = w.experiments.get_by_name(experiment_name=exp_path).experiment.experiment_id
+except Exception:
+    exp_id = w.experiments.create_experiment(name=exp_path).experiment_id
+print(f"Agent MLflow experiment: {exp_id}")
+
 try:
     agent_app = w.apps.get(name="maplechain-agent")
     sp = agent_app.service_principal_client_id
@@ -867,16 +1028,10 @@ try:
     from databricks.sdk.service.catalog import PermissionsChange, Privilege
     w.grants.update(securable_type="model_service", full_name=MS_FQN,
                     changes=[PermissionsChange(principal=sp, add=[Privilege.EXECUTE])])
-    print("  granted EXECUTE on the Model Service to agent SP")
+    print("  granted EXECUTE on the MapleChain Model Service to agent SP")
 
     # (c) MLflow experiment the agent App logs to (MLFLOW_EXPERIMENT_ID in app.yaml). The SP
     # must be able to read it, or the AgentServer crashes on startup.
-    from databricks.sdk.service.iam import AccessControlRequest, PermissionLevel
-    exp_path = f"/Users/{me}/maplechain-agent-exp"
-    try:
-        exp_id = w.experiments.get_by_name(experiment_name=exp_path).experiment.experiment_id
-    except Exception:
-        exp_id = w.experiments.create_experiment(name=exp_path).experiment_id
     w.experiments.set_permissions(
         experiment_id=exp_id,
         access_control_list=[AccessControlRequest(
@@ -899,6 +1054,147 @@ try:
     # service's own connection — the agent SP needs no extra grant on the MCP Service to call it.
 except Exception as e:
     print(f"Agent-SP grants skipped (deploy the agent App first): {type(e).__name__}: {str(e)[:120]}")
+
+# The documented headless /invocations flow authenticates as the gateway SP. AppKit preserves
+# that caller identity for Genie, so it needs the same data and space permissions as an
+# interactive user. Keep these grants independent of agent-App creation so clean deployments
+# and automated smoke tests work before a browser has ever opened the App.
+for stmt in [
+    f"GRANT USE CATALOG ON CATALOG `{catalog}` TO `{gw_sp_app_id}`",
+    f"GRANT USE SCHEMA ON SCHEMA {FQ} TO `{gw_sp_app_id}`",
+    f"GRANT SELECT ON SCHEMA {FQ} TO `{gw_sp_app_id}`",
+]:
+    try: spark.sql(stmt)
+    except Exception as e: print(f"  headless {stmt.split(' ON ')[0]} skipped: {str(e)[:80]}")
+print("  granted UC catalog/schema/select to gateway SP for headless Genie calls")
+
+if genie_space_id:
+    w.permissions.update(
+        request_object_type="genie", request_object_id=genie_space_id,
+        access_control_list=[AccessControlRequest(
+            service_principal_name=gw_sp_app_id, permission_level=PermissionLevel.CAN_RUN)])
+    print(f"  granted CAN_RUN on Genie space {genie_space_id} to gateway SP")
+''')
+
+md(r"""
+### §4-traces — seed representative MapleChain agent traces and evaluation assets
+
+Writes 20 deterministic, nested traces to the same experiment used by the deployed agent,
+including multi-turn sessions. It also creates a managed evaluation dataset and registers
+built-in, custom-code, and custom LLM-judge scorers with the experiment.
+They make the MLflow tracing UI useful immediately in a brand-new workspace and demonstrate
+agent, tool, and chat-model spans without requiring the App to be invoked first.
+""")
+
+code(r'''
+import mlflow
+from mlflow.entities import SpanType
+from mlflow.tracking import MlflowClient
+
+mlflow.set_tracking_uri("databricks")
+mlflow.set_experiment(experiment_id=exp_id)
+seed_tag = "maplechain.seed_traces_version"
+seed_version = "2"
+already_seeded = (mlflow.get_experiment(exp_id).tags or {}).get(seed_tag) == seed_version
+base_examples = [
+    ("What is the risk score for SUP-003?", "get_supplier_risk",
+     {"p_supplier_id": "SUP-003"}, {"supplier_name": "Maritime Catch Co", "risk_score": 0.41},
+     "SUP-003 (Maritime Catch Co) has a supplier risk score of 0.41."),
+    ("Where is SKU-1006 in stock?", "check_inventory", {"p_sku": "SKU-1006"},
+     [{"warehouse": "Toronto, ON", "units_on_hand": 60},
+      {"warehouse": "Calgary, AB", "units_on_hand": 25}],
+     "SKU-1006 has 60 units in Toronto and 25 units in Calgary."),
+    ("Estimate delivery for ORD-9004", "estimate_delivery_eta", {"p_order_id": "ORD-9004"},
+     {"destination": "Toronto, ON", "ship_date": "2026-07-08", "eta": "2026-07-10"},
+     "ORD-9004 is estimated to arrive in Toronto on July 10, 2026."),
+]
+seed_examples = [base_examples[i % len(base_examples)] for i in range(20)]
+if already_seeded:
+    seed_examples = []
+    print(f"MapleChain trace seed version {seed_version} already present; skipping.")
+for index, (question, tool_name, tool_input, tool_output, answer) in enumerate(seed_examples, 1):
+    with mlflow.start_span(name="maplechain_agent", span_type=SpanType.AGENT) as root:
+        root.set_inputs({"input": [{"role": "user", "content": question}]})
+        mlflow.update_current_trace(tags={
+            "environment": "demo", "source": "bundle_seed", "app": "maplechain-agent",
+            # Five four-turn sessions demonstrate session-level trace grouping.
+            "mlflow.trace.session": f"maplechain-seed-session-{((index - 1) // 4) + 1}",
+        })
+        with mlflow.start_span(name=tool_name, span_type=SpanType.TOOL) as tool_span:
+            tool_span.set_inputs(tool_input)
+            tool_span.set_outputs(tool_output)
+        with mlflow.start_span(name=MS_FQN, span_type=SpanType.CHAT_MODEL) as model_span:
+            model_span.set_inputs({"messages": [{"role": "user", "content": question}]})
+            model_span.set_outputs({"role": "assistant", "content": answer})
+        root.set_outputs({"output": [{"role": "assistant", "content": answer}]})
+MlflowClient().set_experiment_tag(exp_id, seed_tag, seed_version)
+print(f"Seeded {len(seed_examples)} MapleChain agent traces in experiment {exp_id}.")
+
+# Managed evaluation dataset (idempotent merge by record identity).
+eval_records = [
+    {"inputs": {"query": q}, "outputs": {"response": answer},
+     "expectations": {"expected_response": answer, "expected_tool": tool}}
+    for q, tool, _tool_input, _tool_output, answer in base_examples
+]
+eval_dataset_name = f"{FQN}.maplechain_agent_evaluation"
+try:
+    eval_dataset = mlflow.genai.datasets.get_dataset(eval_dataset_name)
+except Exception:
+    eval_dataset = mlflow.genai.datasets.create_dataset(
+        name=eval_dataset_name,
+        experiment_id=exp_id,
+    )
+eval_dataset.merge_records(eval_records)
+print(f"Seeded evaluation dataset: {FQN}.maplechain_agent_evaluation")
+
+# Register representative production scorers; registration is idempotent by scorer name/version.
+from mlflow.genai.scorers import Safety, Guidelines, scorer
+from mlflow.genai.judges import make_judge
+
+@scorer(name="maplechain_has_answer")
+def maplechain_has_answer(outputs):
+    return bool((outputs or {}).get("response", "").strip())
+
+registered_scorers = [
+    Safety().register(name="maplechain_safety", experiment_id=exp_id),
+    Guidelines(name="maplechain_professional_tone",
+               guidelines="The response must be concise, professional, and directly address the request.").register(
+                   experiment_id=exp_id),
+    maplechain_has_answer.register(experiment_id=exp_id),
+    make_judge(
+        name="maplechain_supply_chain_judge",
+        instructions=("Given the request {{ inputs }} and response {{ outputs }}, evaluate whether "
+                      "the response accurately answers the MapleChain supply-chain request, cites "
+                      "relevant business identifiers, and avoids unsupported claims. Return true or false."),
+        feedback_value_type=bool,
+        model=f"databricks:/{MS_FQN}",
+    ).register(experiment_id=exp_id),
+]
+print("Registered experiment scorers:", [s.name for s in registered_scorers])
+''')
+
+md(r"""
+### §4-skills — seed project-specific coding-agent skills in Unity Catalog
+
+Creates native `SKILL` securables in the target schema for common maintenance workflows.
+These are schema assets, not local editor configuration, and are safe to create repeatedly.
+""")
+
+code(r'''
+skill_comments = {
+    "maplechain_bundle_deployer": "Deploy and validate the MapleChain bundle, setup job, and both XL Databricks Apps.",
+    "maplechain_gateway_debugger": "Diagnose MapleChain Model, Provider, MCP, and Agent Services plus Genie connectivity.",
+    "maplechain_eval_curator": "Maintain seeded MLflow traces, sessions, evaluation datasets, and experiment scorers.",
+}
+for skill_id, comment in skill_comments.items():
+    try:
+        w.api_client.do("GET", f"/api/2.1/unity-catalog/skills/{FQN}.{skill_id}")
+        print(f"Coding-agent skill exists: {FQN}.{skill_id}")
+    except Exception:
+        w.api_client.do("POST", "/api/2.1/unity-catalog/skills",
+                        query={"parent": f"schemas/{FQN}", "skill_id": skill_id},
+                        body={"comment": comment})
+        print(f"Created coding-agent skill: {FQN}.{skill_id}")
 ''')
 
 md(r"""
@@ -1078,8 +1374,9 @@ print("Built-in: system.ai.block_unsafe_content / block_jailbreak / block_halluc
 print(f"\nAgent:")
 try:
     from mlflow.tracking import MlflowClient
-    m = MlflowClient().get_model_version_by_alias(f"{FQN}.{agent_model}", "prod")
-    print(f"  UC model {FQN}.{agent_model} @prod -> v{m.version}")
+    m = MlflowClient(registry_uri="databricks-uc").get_model_version_by_alias(
+        f"{FQN}.{ml_model}", "prod")
+    print(f"  UC ML model {FQN}.{ml_model} @prod -> v{m.version}")
 except Exception as e:
     print(f"  alias lookup: {str(e)[:100]}")
 try:

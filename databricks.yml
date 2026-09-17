@@ -2,7 +2,8 @@
 # See https://docs.databricks.com/dev-tools/bundles/index.html
 #
 # ─────────────────────────────────────────────────────────────────────────────
-#  SINGLE SOURCE OF TRUTH — change these two knobs to retarget the whole demo:
+#  SINGLE SOURCE OF TRUTH — two required knobs retarget the demo; optional
+#  foundry_* and azure_openai_* inputs enable the provider-service examples:
 #    • Workspace / URL : chosen by the CLI --profile flag (NOT stored here), so the
 #                        host lives only in ~/.databrickscfg. Switch workspace = --profile <name>.
 #    • Catalog / schema: the `variables` block below. Change `catalog` in ONE place and it
@@ -17,7 +18,7 @@ bundle:
 variables:
   catalog:
     description: UC catalog for all MapleChain demo assets. THE knob to change per workspace.
-    default: catalog_sandbox_gcgw55
+    default: brlui
   schema:
     description: UC schema for all MapleChain demo assets.
     default: uaig_demo
@@ -27,11 +28,37 @@ variables:
   experiment_id:
     description: MLflow experiment id printed by setup.ipynb §4-grants (the agent logs to it).
     default: ""
+  foundry_base_url:
+    description: Microsoft Foundry project/inference base URL. Blank skips the provider-service example.
+    default: ""
+  foundry_model:
+    description: Microsoft Foundry model/deployment target exposed by the provider service.
+    default: ""
+  foundry_secret_scope:
+    description: Databricks secret scope containing the Microsoft Foundry API key.
+    default: ""
+  foundry_secret_key:
+    description: Key within foundry_secret_scope containing the Microsoft Foundry API key.
+    default: ""
+  azure_openai_base_url:
+    description: Azure OpenAI resource base URL. Blank with all azure_openai_* vars skips maplechain_azure_mps.
+    default: "https://oneenvazureopenai.openai.azure.com/"
+  azure_openai_model:
+    description: Azure OpenAI deployment/model target exposed by maplechain_azure_mps.
+    default: "gpt-6-astra"
+  azure_openai_secret_scope:
+    description: Databricks secret scope containing the Azure OpenAI API key.
+    default: "maplechain_demo"
+  azure_openai_secret_key:
+    description: Key within azure_openai_secret_scope containing the Azure OpenAI API key.
+    default: "azure_openai_api_key"
 
 resources:
   apps:
     maplechain_mcp:
       name: "mcp-maplechain"
+      # Databricks Apps API enum LARGE is the XL tier shown in the workspace UI.
+      compute_size: LARGE
       description: "MapleChain custom MCP server (supply-chain tools)"
       source_code_path: ./mcp_app
       config:
@@ -39,14 +66,18 @@ resources:
 
     maplechain_agent:
       name: "maplechain-agent"
-      description: "MapleChain supply-chain LangGraph agent"
+      # Databricks Apps API enum LARGE is the XL tier shown in the workspace UI.
+      compute_size: LARGE
+      description: "MapleChain enterprise supply-chain copilot (AppKit beta agents)"
       source_code_path: ./agent_app
+      user_api_scopes:
+        - dashboards.genie
       config:
-        command: ["uv", "run", "start-server"]
+        command: ["npm", "run", "start"]
         # Env is defined HERE (databricks.yml), so ${var.*} substitutes at deploy time. Deploy
         # the app with `databricks bundle run maplechain_agent` (which applies this config.env) —
         # NOT `apps deploy --source-code-path`, which would read the static agent_app/app.yaml.
-        # MODEL_SERVICE / MCP_SERVICE are DERIVED from UC_CATALOG+UC_SCHEMA in agent.py, so the
+        # MODEL_SERVICE / MCP_SERVICE are DERIVED from UC_CATALOG+UC_SCHEMA in server/server.ts, so the
         # catalog appears exactly once (var.catalog).
         env:
           - name: MLFLOW_TRACKING_URI
@@ -59,6 +90,13 @@ resources:
             value: ${var.schema}
           - name: GENIE_SPACE_ID
             value: ${var.genie_space_id}
+          - name: DATABRICKS_GENIE_SPACE_ID
+            value: ${var.genie_space_id}
+          # Genie can legitimately spend several minutes in ASKING_AI while a
+          # warehouse starts or a complex query is planned. AppKit defaults to
+          # 120 seconds; use an explicit production-safe deadline instead.
+          - name: GENIE_TIMEOUT_MS
+            value: "600000"
           - name: MLFLOW_EXPERIMENT_ID
             value: ${var.experiment_id}
 
@@ -75,6 +113,14 @@ resources:
             base_parameters:
               catalog: ${var.catalog}
               schema: ${var.schema}
+              foundry_base_url: ${var.foundry_base_url}
+              foundry_model: ${var.foundry_model}
+              foundry_secret_scope: ${var.foundry_secret_scope}
+              foundry_secret_key: ${var.foundry_secret_key}
+              azure_openai_base_url: ${var.azure_openai_base_url}
+              azure_openai_model: ${var.azure_openai_model}
+              azure_openai_secret_scope: ${var.azure_openai_secret_scope}
+              azure_openai_secret_key: ${var.azure_openai_secret_key}
 
 targets:
   dev:

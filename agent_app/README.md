@@ -1,49 +1,62 @@
-# MapleChain agent (LangGraph)
+# MapleChain agent (AppKit beta)
 
-A LangGraph `ResponsesAgent` for the MapleChain demo, customized from the
-databricks/app-templates `agent-langgraph` template. Deployed as a Databricks App and also
-registered in Unity Catalog as a model (see repo root `README.md`, §4).
+An enterprise React/TypeScript chat application built with Databricks AppKit `0.57.0` and its
+beta `agents()` plugin. AppKit owns streaming, conversation threads, cancellation, retries, and
+agent event parsing; the UI renders only user-facing answer deltas and shows safe tool activity
+instead of chain-of-thought or raw JSON envelopes.
 
-**UI:** opening the App URL shows a built-in chat page. The upstream template's `enable_chat_proxy`
-expects a *separate* Next.js frontend (`e2e-chatbot-app-next`) on port 3000 — which needs Node at
-runtime and a git clone at startup, fragile inside Databricks Apps (with no frontend running, `/`
-returns 503). Instead we set `enable_chat_proxy=False` and serve a self-contained
-`agent_server/static/index.html` from the FastAPI app itself (mounted at `/`), which POSTs to the
-same `/invocations` endpoint. One process, no Node, no clone.
+The AppKit agent uses its chat-completions adapter against the deterministic Unity AI Gateway
+Model Service derived as `<UC_CATALOG>.<UC_SCHEMA>.maplechain_custom_ms` (Sonnet with Haiku
+fallback). This is the demo's single, deterministic Model Service, avoiding provider-specific
+tool-call behavior in interactive turns.
+Governed MapleChain data access is
+provided by the AppKit Genie plugin. Location values are injected by the root bundle; do not
+hardcode workspace URLs, catalog names, or IDs.
 
-## Demo wiring (two things worth noticing)
+The bundle sets `GENIE_TIMEOUT_MS=600000` (10 minutes). Genie may remain in `ASKING_AI` for more
+than two minutes while its SQL warehouse starts or it plans a complex query, so the AppKit
+plugin's 120-second default is too short for this demo. The agent tool deadline is automatically
+set 30 seconds higher than the Genie deadline. If a target needs a different limit, change the
+bundle-managed environment value; keep the tool deadline higher than the plugin deadline.
 
-- **LLM = the Model Service** (`MODEL_SERVICE`, a UC gateway object; **derived** from
-  `UC_CATALOG`+`UC_SCHEMA` as `<catalog>.<schema>.maplechain_custom_ms`), reached with
-  `ChatDatabricks(model=MODEL_SERVICE, use_ai_gateway=True)`. Every turn goes through the Unity
-  AI Gateway, so routing, fallback, and rate limits apply automatically.
-- **Tools = three MCP sources**, each loaded independently so one failing endpoint can't drop the
-  rest: (1) managed **UC functions** by **per-function** MCP URLs
-  (`/api/2.0/mcp/functions/{catalog}/{schema}/{fn}` — the schema-level URL breaks on the VARIANT
-  service-policy UDFs); (2) the managed **Genie** MCP (`/api/2.0/mcp/genie/{GENIE_SPACE_ID}`) for
-  natural-language data Q&A (the App SP needs `CAN_RUN` on the space); (3) the custom **MCP
-  Service** (`/ai-gateway/mcp-services/{MCP_SERVICE}`) — the mcp_app/ tools governed through the UC
-  MCP Service, with the AI Gateway injecting the connection's credentials.
+This hybrid is intentional: in this workspace AppKit `0.57.0`'s managed Supervisor adapter rejects
+both direct foundation-model names and this demo's routed Model Service. The chat-completions
+adapter preserves Model Service routing while the Genie toolkit avoids the beta MCP connector's
+same-origin/private-DNS bug.
 
-Configuration is via env vars, defined once in the bundle (`databricks.yml` → `variables` +
-`config.env`): `UC_CATALOG`, `UC_SCHEMA`, `GENIE_SPACE_ID`, `MLFLOW_EXPERIMENT_ID`. `MODEL_SERVICE`
-and `MCP_SERVICE` are derived from `UC_CATALOG`+`UC_SCHEMA` (override the env var only to point at a
-differently named service). The static `app.yaml` carries only the `command` + MLflow tracking
-vars; location config is applied at deploy time by `bundle run`. For local dev, set the vars in a
-`.env` (see `.env.example`).
-
-## Run locally
+## Local development
 
 ```bash
-cp .env.example .env    # fill in DATABRICKS_CONFIG_PROFILE + MLFLOW_EXPERIMENT_ID
-uv run start-server     # serves /invocations on http://localhost:8000
+cp .env.example .env
+# Set DATABRICKS_CONFIG_PROFILE, DATABRICKS_HOST, UC_CATALOG, UC_SCHEMA, and GENIE_SPACE_ID.
+npm install
+npm run dev
 ```
 
-## Deploy as a Databricks App
+Run `npm run typecheck`, `npm run lint`, and `npm run build` before deployment.
 
-From the repo root:
+## Bundle deployment
+
+From the repository root, always pass the intended profile and the same bundle variables used by
+setup:
 
 ```bash
-databricks bundle deploy -t dev --profile <your-profile>
-databricks bundle run    maplechain_agent -t dev --profile <your-profile>   # applies config.env + starts
+databricks bundle deploy -t dev --profile <profile> --var 'catalog=<catalog>' \
+  --var 'genie_space_id=<id>' --var 'experiment_id=<id>'
+databricks bundle run maplechain_agent -t dev --profile <profile> \
+  --var 'catalog=<catalog>' --var 'genie_space_id=<id>' --var 'experiment_id=<id>'
 ```
+
+`bundle run` is required because it applies the bundle-managed environment and starts the App.
+The bundle enables `dashboards.genie` user authorization. The UI truthfully discloses that Genie
+runs on behalf of the signed-in user while model inference runs as the App service principal.
+
+After deleting and recreating the App, the first `bundle run` may spend several minutes creating
+compute before its source snapshot becomes active. If it ends without a deployment, rerun the same
+command. If a deployment fails, inspect `databricks apps logs maplechain-agent --profile <profile>`;
+after a full bundle sync, it is also safe to redeploy the bundle-managed source path directly.
+
+Keep the AppKit-generated dependency versions and lockfile intact. In this workspace, adding a
+package through npm's legacy peer resolver caused the Databricks Apps npm 10.9.2 builder to hang
+and end with `Exit handler never called`; the answer formatter intentionally has no extra runtime
+dependency.
