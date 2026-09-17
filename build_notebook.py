@@ -7,13 +7,14 @@ Cells are appended via md()/code(); the theme, idempotency, and verified API
 shapes all live here.
 """
 import json
-import uuid
 
 CELLS = []
 
 
 def _id():
-    return uuid.uuid4().hex[:8]
+    # Stable notebook ids keep regeneration byte-for-byte reproducible. Random UUIDs
+    # made an unchanged build_notebook.py rewrite every cell in setup.ipynb.
+    return f"cell-{len(CELLS) + 1:02d}"
 
 
 def md(src: str):
